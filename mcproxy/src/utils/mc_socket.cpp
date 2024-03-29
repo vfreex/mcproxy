@@ -37,6 +37,12 @@
 #include <numeric>
 #include <unistd.h>
 
+#if !defined(__GLIBC__) || defined(__UCLIBC__)
+#define IP_MULTICAST_ALL 49
+
+#include "sourcefilter.cpp"
+#endif /* __GLIBC__ */
+
 std::string ipAddrResolver(std::string ipAddr)
 {
     std::string str[][2] = {

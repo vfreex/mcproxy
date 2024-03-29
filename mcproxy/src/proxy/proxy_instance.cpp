@@ -119,7 +119,7 @@ bool proxy_instance::init_sender()
 {
     HC_LOG_TRACE("");
     if (is_IPv4(m_group_mem_protocol)) {
-        m_sender = std::make_shared<igmp_sender>(m_interfaces);
+        m_sender = std::make_shared<igmp_sender>(m_interfaces, m_group_mem_protocol );
     } else if (is_IPv6(m_group_mem_protocol)) {
         m_sender = std::make_shared<mld_sender>(m_interfaces);
     } else {
@@ -171,6 +171,9 @@ void proxy_instance::worker_thread()
     HC_LOG_TRACE("");
     while (m_running) {
         auto msg = m_job_queue.dequeue();
+
+        HC_LOG_DEBUG("Proxy Message: " << msg->get_message_type_name(msg->get_type()) );
+
         switch (msg->get_type()) {
         case proxy_msg::TEST_MSG:
             (*msg)();
@@ -193,25 +196,66 @@ void proxy_instance::worker_thread()
         }
         break;
         case proxy_msg::GROUP_RECORD_MSG: {
-            auto r =  std::static_pointer_cast<group_record_msg>(msg);
+            auto gr = std::static_pointer_cast<group_record_msg>(msg);
 
             if (m_in_debug_testing_mode) {
                 std::cout << "!!--ACTION: receive record" << std::endl;
-                std::cout << *r << std::endl;
+                std::cout << *gr << std::endl;
                 std::cout << std::endl;
             }
 
-            auto it = m_downstreams.find(r->get_if_index());
-            if (it != std::end(m_downstreams)) {
-                it->second.m_querier->receive_record(msg);
+            auto slist = gr->get_slist();
+            addr_storage saddr;
+            if (slist.empty()) {
+                saddr = "0.0.0.0";
             } else {
-                HC_LOG_DEBUG("failed to find querier of interface: " << interfaces::get_if_name(std::static_pointer_cast<timer_msg>(msg)->get_if_index()));
+                saddr = slist.begin()->saddr;
             }
-        }
+            auto it = m_downstreams.find(gr->get_if_index());
+            if (it != std::end(m_downstreams)) {
+                // Check for input filters
+                if (!it->second.m_interface->match_input_filter(interfaces::get_if_name(gr->get_if_index()), saddr, gr->get_gaddr()))
+                {
+                    HC_LOG_DEBUG("group report " << gr->get_gaddr() << " filtered");
+                }
+                else
+                {
+                    it->second.m_querier->receive_record(msg);
+                }
+            } else {
+                HC_LOG_DEBUG("failed to find querier of interface: " << interfaces::get_if_name( gr->get_if_index() ));
+            }
+		}
         break;
-        case proxy_msg::NEW_SOURCE_MSG:
-            m_routing_management->event_new_source(msg);
-            break;
+        case proxy_msg::NEW_SOURCE_MSG: {
+            auto sm = std::static_pointer_cast<new_source_msg>(msg);
+            // Find the interface
+            std::shared_ptr<interface> interf;
+            auto it = m_downstreams.find(sm->get_if_index());
+            if (it != std::end(m_downstreams)) {
+                interf = it->second.m_interface;
+            } else {
+                for (auto & e : m_upstreams) {
+                    if (e.m_if_index == sm->get_if_index()) {
+                        interf = e.m_interface;
+                        break;
+                    }
+                }
+            }
+            if ( !interf )
+            {
+                HC_LOG_DEBUG("failed to find interface: " << interfaces::get_if_name( sm->get_if_index() ) << " for Source message " << sm->get_saddr()  << " | " << sm->get_gaddr() );
+                break;
+            }
+            // Check for input filters
+            if (!interf->match_input_filter(interfaces::get_if_name(sm->get_if_index()), sm->get_saddr(), sm->get_gaddr()))
+            {
+                HC_LOG_DEBUG("source " << sm->get_saddr()  << " | " << sm->get_gaddr() << " filtered");
+            } else {
+                m_routing_management->event_new_source(msg);
+            }
+		}
+        break;
         case proxy_msg::NEW_SOURCE_TIMER_MSG:
             m_routing_management->timer_triggerd_maintain_routing_table(msg);
             break;

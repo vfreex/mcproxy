@@ -32,7 +32,7 @@
 
 #include <memory>
 
-igmp_sender::igmp_sender(const std::shared_ptr<const interfaces>& interfaces): sender(interfaces, IGMPv3)
+igmp_sender::igmp_sender(const std::shared_ptr<const interfaces>& interfaces, const group_mem_protocol gmp): sender(interfaces, gmp)
 {
     HC_LOG_TRACE("");
 
@@ -119,9 +119,78 @@ bool igmp_sender::send_mc_addr_and_src_specific_query(unsigned int if_index, con
     return rc;
 }
 
+bool igmp_sender::send_igmpv2_query(unsigned int if_index, const timers_values& tv, const addr_storage& gaddr ) const
+{
+    HC_LOG_TRACE("");
+
+    std::unique_ptr<unsigned char[]> packet;
+    unsigned int size;
+
+	size = sizeof(ip) + sizeof(router_alert_option) + sizeof(igmp);
+	packet.reset(new unsigned char[size]);
+
+    addr_storage dst_addr;
+
+    if (gaddr == addr_storage(AF_INET)) { //is general query
+        dst_addr = IPV4_ALL_HOST_ADDR;
+    } else {
+        dst_addr = gaddr;
+    }
+
+    //-------------------------------------------------------------------
+    //fill ip header
+    ip* ip_hdr = reinterpret_cast<ip*>(packet.get());
+
+    ip_hdr->ip_v = 4;
+    ip_hdr->ip_hl = (sizeof(ip) + sizeof(router_alert_option)) / 4;
+    ip_hdr->ip_tos = 0;
+    ip_hdr->ip_len = htons(size);
+    ip_hdr->ip_id = 0;
+    ip_hdr->ip_off = htons(0 | IP_DF); //dont fragment flag
+    ip_hdr->ip_ttl = 1;
+    ip_hdr->ip_p = IPPROTO_IGMP;
+    ip_hdr->ip_sum = 0;
+    ip_hdr->ip_src = m_interfaces->get_saddr(interfaces::get_if_name(if_index)).get_in_addr();
+    ip_hdr->ip_dst = dst_addr.get_in_addr();
+
+    //-------------------------------------------------------------------
+    //fill router_alert_option header
+    router_alert_option* ra_hdr = reinterpret_cast<router_alert_option*>(reinterpret_cast<unsigned char*>(ip_hdr) + sizeof(ip));
+    *ra_hdr = router_alert_option();
+
+    ip_hdr->ip_sum = m_sock.calc_checksum(reinterpret_cast<unsigned char*>(ip_hdr), sizeof(ip) + sizeof(router_alert_option));
+
+    //-------------------------------------------------------------------
+    //fill igmpv3 query
+    igmp* query = reinterpret_cast<igmp*>(reinterpret_cast<unsigned char*>(ra_hdr) + sizeof(router_alert_option));
+
+    query->igmp_type = IGMP_MEMBERSHIP_QUERY;
+
+    if (gaddr == addr_storage(AF_INET)) { //general query
+        query->igmp_code = tv.maxrespi_to_maxrespc_igmpv3(tv.get_query_response_interval());
+    } else {
+        query->igmp_code = tv.maxrespi_to_maxrespc_igmpv3(tv.get_last_listener_query_time());
+    }
+
+    query->igmp_cksum = 0;
+    query->igmp_group = gaddr.get_in_addr();
+
+    query->igmp_cksum = m_sock.calc_checksum(reinterpret_cast<unsigned char*>(query), (sizeof(igmp) ));
+
+    if (!m_sock.choose_if(if_index)) {
+        return false;
+    }
+
+    return m_sock.send_packet(dst_addr, reinterpret_cast<unsigned char*>(ip_hdr), size);
+}
+
 bool igmp_sender::send_igmpv3_query(unsigned int if_index, const timers_values& tv, const addr_storage& gaddr, bool s_flag, const source_list<source>& slist) const
 {
     HC_LOG_TRACE("");
+
+    if ( (m_group_mem_protocol & IGMPv3) == 0 ) {
+		return send_igmpv2_query( if_index, tv, gaddr );
+	}
 
     std::unique_ptr<unsigned char[]> packet;
     unsigned int size;
